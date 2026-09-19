@@ -36,13 +36,18 @@ def _col_name(node: exp.Expression) -> str:
     return _strip_qualifier(rendered)
 
 
+def _is_star(node: exp.Expression) -> bool:
+    """Return True for ``*`` and for a qualified ``dataset.*``."""
+    return isinstance(node, exp.Star) or (isinstance(node, exp.Column) and isinstance(node.this, exp.Star))
+
+
 def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, Optional[float], bool]]:
     """Parse a SQL aggregation expression using sqlglot.
 
     Returns ``(agg_type, bare_col, percentile, use_discrete_percentile)`` for recognised patterns,
     ``None`` otherwise. ``percentile`` is only set for ``PERCENTILE`` aggregations; it is ``None``
     for all others. ``use_discrete_percentile`` is ``True`` only for ``PERCENTILE_DISC``.
-    The returned column name has any dataset qualifier stripped.
+    The returned column name has any dataset qualifier stripped; ``COUNT(*)`` returns the constant ``"1"``.
     """
     try:
         tree = sqlglot.parse_one(expression.strip())
@@ -55,6 +60,10 @@ def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, O
         if len(cols) == 1:
             return AggregationType.COUNT_DISTINCT, _col_name(cols[0]), None, False
         return None
+
+    # COUNT(*) → count of the constant 1 (MetricFlow cannot render a bare * inside a count)
+    if isinstance(tree, exp.Count) and _is_star(tree.this):
+        return AggregationType.COUNT, "1", None, False
 
     # COUNT(col)
     if isinstance(tree, exp.Count):

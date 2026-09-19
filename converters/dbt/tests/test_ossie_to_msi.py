@@ -319,6 +319,47 @@ class TestOssieToMSIMetricConversion:
         sm = result.semantic_models[0]
         assert len(sm.measures) == 0
 
+    @pytest.mark.parametrize("expression", ["COUNT(*)", "count( * )", "COUNT(orders.*)"])
+    def test_count_star_uses_constant_expr(self, expression: str) -> None:
+        doc = _ossie_doc(
+            datasets=[_ossie_dataset("orders", fields=[_ossie_field("order_id")])],
+            metrics=[_ossie_metric("order_count", expression)],
+        )
+        result = OssieToMSIConverter().convert(doc).output
+
+        m = result.metrics[0]
+        assert m.type_params.metric_aggregation_params is not None
+        assert m.type_params.metric_aggregation_params.agg == AggregationType.COUNT
+        assert m.type_params.expr == "1"
+
+    def test_qualified_count_star_uses_dataset_qualifier(self) -> None:
+        doc = _ossie_doc(
+            datasets=[
+                _ossie_dataset("customers", fields=[_ossie_field("customer_id")]),
+                _ossie_dataset("orders", fields=[_ossie_field("order_id")]),
+            ],
+            metrics=[_ossie_metric("order_count", "COUNT(orders.*)")],
+        )
+        result = OssieToMSIConverter().convert(doc).output
+
+        m = result.metrics[0]
+        assert m.type_params.expr == "1"
+        assert m.type_params.metric_aggregation_params is not None
+        assert m.type_params.metric_aggregation_params.semantic_model == "orders"
+
+    def test_count_star_in_ratio_uses_constant_expr(self) -> None:
+        doc = _ossie_doc(
+            datasets=[_ossie_dataset("orders", fields=[_ossie_field("amount")])],
+            metrics=[_ossie_metric("avg_order_value", "(SUM(amount)) / (COUNT(*))")],
+        )
+        result = OssieToMSIConverter().convert(doc).output
+
+        by_name = {m.name: m for m in result.metrics}
+        denominator = by_name["avg_order_value__denominator"]
+        assert denominator.type_params.metric_aggregation_params is not None
+        assert denominator.type_params.metric_aggregation_params.agg == AggregationType.COUNT
+        assert denominator.type_params.expr == "1"
+
     def test_ratio_expression_produces_ratio_metric(self) -> None:
         doc = _ossie_doc(
             datasets=[
