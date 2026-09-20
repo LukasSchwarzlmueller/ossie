@@ -22,6 +22,9 @@ import sqlglot.expressions as exp
 
 from metricflow_semantic_interfaces.type_enums import AggregationType
 
+# expr for "count all rows": MetricFlow wraps a count's expr in CASE WHEN, where a bare * is invalid
+ROW_COUNT_EXPR = "1"
+
 
 def _strip_qualifier(col: str) -> str:
     """Strip a leading dataset qualifier, e.g. 'orders.amount' → 'amount'."""
@@ -47,27 +50,28 @@ def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, O
     Returns ``(agg_type, bare_col, percentile, use_discrete_percentile)`` for recognised patterns,
     ``None`` otherwise. ``percentile`` is only set for ``PERCENTILE`` aggregations; it is ``None``
     for all others. ``use_discrete_percentile`` is ``True`` only for ``PERCENTILE_DISC``.
-    The returned column name has any dataset qualifier stripped; ``COUNT(*)`` returns the constant ``"1"``.
+    The returned column name has any dataset qualifier stripped. ``COUNT(*)`` and ``COUNT(dataset.*)`` return
+    ``ROW_COUNT_EXPR`` instead of a column name; ``COUNT(DISTINCT *)`` and multi-argument ``COUNT`` return ``None``.
     """
     try:
         tree = sqlglot.parse_one(expression.strip())
     except sqlglot.errors.ParseError:
         return None
 
-    # COUNT(DISTINCT col)
-    if isinstance(tree, exp.Count) and isinstance(tree.this, exp.Distinct):
-        cols = tree.this.expressions
-        if len(cols) == 1:
-            return AggregationType.COUNT_DISTINCT, _col_name(cols[0]), None, False
-        return None
-
-    # COUNT(*) → count of the constant 1 (MetricFlow cannot render a bare * inside a count)
-    if isinstance(tree, exp.Count) and _is_star(tree.this):
-        return AggregationType.COUNT, "1", None, False
-
-    # COUNT(col)
     if isinstance(tree, exp.Count):
-        return AggregationType.COUNT, _col_name(tree.this), None, False
+        # COUNT(a, b) has no single-column equivalent
+        if tree.args.get("expressions"):
+            return None
+        argument, distinct = tree.this, False
+        if isinstance(argument, exp.Distinct):
+            operands = argument.expressions
+            if len(operands) != 1:
+                return None
+            argument, distinct = operands[0], True
+        if _is_star(argument):
+            # COUNT(*) → count all rows; COUNT(DISTINCT *) is not valid SQL
+            return None if distinct else (AggregationType.COUNT, ROW_COUNT_EXPR, None, False)
+        return (AggregationType.COUNT_DISTINCT if distinct else AggregationType.COUNT), _col_name(argument), None, False
 
     # SUM(CASE WHEN col THEN 1 ELSE 0 END) → SUM_BOOLEAN
     if isinstance(tree, exp.Sum) and isinstance(tree.this, exp.Case):

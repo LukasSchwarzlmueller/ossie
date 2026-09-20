@@ -19,7 +19,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from ossie import (
     OssieDataset,
@@ -33,6 +33,7 @@ from ossie import (
     OssieRelationship,
 )
 from ossie_dbt.converter_issues import ConverterIssue, ConverterIssueType, ConverterResult
+from ossie_dbt.expression_utils import ROW_COUNT_EXPR
 from ossie_dbt.filter_utils import _collect_filter_sql, _merge_filter_sqls
 
 from metricflow_semantic_interfaces.enum_extension import assert_values_exhausted
@@ -77,10 +78,21 @@ class MSIToOssieConverter:
 
     def __init__(self, dialect: OssieDialect = OssieDialect.ANSI_SQL) -> None:
         self._dialect = dialect
+        self._row_count_metrics: FrozenSet[str] = frozenset()
 
     def convert(
         self, manifest: PydanticSemanticManifest, ossie_model_name: str = "semantic_model"
     ) -> ConverterResult[OssieDocument]:
+        # The transformer rewrites COUNT to SUM (leaving expr '1' as SUM(1)), which loses the dataset a row
+        # count belongs to. Remember these metrics so they come back as COUNT(<dataset>.*).
+        self._row_count_metrics = frozenset(
+            metric.name
+            for metric in manifest.metrics
+            if metric.type is MetricType.SIMPLE
+            and metric.type_params.metric_aggregation_params is not None
+            and metric.type_params.metric_aggregation_params.agg is AggregationType.COUNT
+            and metric.type_params.expr == ROW_COUNT_EXPR
+        )
         manifest = PydanticSemanticManifestTransformer.transform(manifest)
         issues: List[ConverterIssue] = []
 
@@ -251,6 +263,9 @@ class MSIToOssieConverter:
             raise ValueError(
                 f"SIMPLE metric has no metric_aggregation_params after transformation: metric_name={metric.name!r}"
             )
+        # With a filter the count is emitted as SUM(CASE WHEN <filter> THEN 1 END), which has no `dataset.*` form.
+        if metric.name in self._row_count_metrics and not filter_sql:
+            return f"COUNT({agg_params_obj.semantic_model}.*)"
         col = metric.type_params.expr if metric.type_params.expr is not None else metric.name
         col = self._qualify_col(col, agg_params_obj.semantic_model)
         return self._build_agg_expression(agg_params_obj.agg, col, agg_params_obj.agg_params, filter_sql)

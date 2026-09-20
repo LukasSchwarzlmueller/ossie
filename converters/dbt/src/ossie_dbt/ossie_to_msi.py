@@ -28,6 +28,7 @@ from ossie import (
 )
 from ossie_dbt.converter_issues import ConverterResult
 from ossie_dbt.expression_utils import (
+    ROW_COUNT_EXPR,
     _extract_agg_info,
     _get_dataset_qualifier,
     _strip_qualifier,
@@ -293,7 +294,11 @@ class OssieToMSIConverter:
         agg_result = _extract_agg_info(expr_str)
         if agg_result is not None:
             agg, col, percentile, use_discrete = agg_result
-            semantic_model_name = self._find_dataset_for_col(expr_str, col, datasets)
+            if agg is AggregationType.COUNT and col == ROW_COUNT_EXPR:
+                # A constant, not a column: it must not go through the column → dataset lookup.
+                semantic_model_name = self._find_dataset_for_row_count(name, expr_str, datasets)
+            else:
+                semantic_model_name = self._find_dataset_for_col(expr_str, col, datasets)
             agg_params = (
                 PydanticMeasureAggregationParameters(
                     percentile=percentile,
@@ -403,6 +408,38 @@ class OssieToMSIConverter:
                     return dataset.name
 
         return datasets[0].name if datasets else ""
+
+    @staticmethod
+    def _find_dataset_for_row_count(
+        metric_name: str,
+        raw_expr_str: str,
+        datasets: List[OssieDataset],
+    ) -> str:
+        """Determine which dataset a ``COUNT(*)`` counts the rows of.
+
+        Only the qualifier decides: ``COUNT(orders.*)`` names ``orders`` (a schema prefix such as
+        ``db.orders.*`` is matched on its last segment). A bare ``COUNT(*)`` is only unambiguous when the
+        document has a single dataset; otherwise guessing would count the rows of an unrelated table.
+        """
+        dataset_names = [dataset.name for dataset in datasets]
+        qualifier = _get_dataset_qualifier(raw_expr_str)
+        if qualifier is None:
+            if len(dataset_names) == 1:
+                return dataset_names[0]
+            raise ValueError(
+                f"Metric {metric_name!r}: 'COUNT(*)' is ambiguous with {len(dataset_names)} datasets "
+                f"({', '.join(dataset_names)}); qualify it as 'COUNT(<dataset>.*)'"
+            )
+
+        if qualifier in dataset_names:
+            return qualifier
+        by_last_segment = [name for name in dataset_names if _strip_qualifier(name) == _strip_qualifier(qualifier)]
+        if len(by_last_segment) == 1:
+            return by_last_segment[0]
+        raise ValueError(
+            f"Metric {metric_name!r}: 'COUNT({qualifier}.*)' does not match exactly one dataset "
+            f"(datasets: {', '.join(dataset_names)})"
+        )
 
     def _get_expression(self, ossie_expr: OssieExpression) -> str:
         """Return the expression string for the preferred dialect (fallback: first available)."""

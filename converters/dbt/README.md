@@ -129,7 +129,7 @@ manifest_json = result.output.model_dump_json(by_alias=True, exclude_none=True, 
 
 - Composite primary and unique keys are rejected because MSI entities cannot preserve grouped key semantics
 - Single aggregations (`SUM(col)`, `COUNT(DISTINCT col)`, etc.) → SIMPLE metric with `metric_aggregation_params`
-- `COUNT(*)` → `count` SIMPLE metric with `expr: '1'`, because MetricFlow cannot render a bare `*` inside a count
+- `COUNT(*)` / `COUNT(<dataset>.*)` → `count` SIMPLE metric with `expr: '1'`, because MetricFlow cannot render a bare `*` inside a count. The counted dataset comes from the qualifier, so with more than one dataset write `COUNT(orders.*)`; a bare `COUNT(*)` is rejected as ambiguous
 - `(expr_a) / (expr_b)` → RATIO metric with auto-generated sub-metrics
 - Anything else → SIMPLE metric with the raw expression stored verbatim
 - Time dimensions always receive `TimeGranularity.DAY` (Ossie carries no granularity field)

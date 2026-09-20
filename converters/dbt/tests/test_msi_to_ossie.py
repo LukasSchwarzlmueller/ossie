@@ -81,6 +81,34 @@ def _ossie_metrics(result: OssieDocument) -> list:
     return metrics
 
 
+def _metric_with_agg(
+    name: str,
+    agg: AggregationType,
+    expr: str,
+    semantic_model: str,
+    filter_sql: Optional[str] = None,
+) -> PydanticMetric:
+    """A SIMPLE metric that carries its aggregation in metric_aggregation_params."""
+    return PydanticMetric(
+        name=name,
+        description=None,
+        type=MetricType.SIMPLE,
+        type_params=PydanticMetricTypeParams(
+            expr=expr,
+            metric_aggregation_params=PydanticMetricAggregationParams(
+                semantic_model=semantic_model,
+                agg=agg,
+                agg_params=None,
+                agg_time_dimension=None,
+                non_additive_dimension=None,
+            ),
+        ),
+        filter=_filter(filter_sql) if filter_sql else None,
+        metadata=default_meta(),
+        config=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -583,6 +611,30 @@ class TestMetricConversion:
         result = MSIToOssieConverter().convert(_manifest(semantic_models=[sm], metrics=[metric])).output
 
         assert _ossie_metrics(result)[0].expression.dialects[0].expression == "AVG(orders.price)"
+
+    def test_count_of_all_rows_keeps_its_semantic_model(self) -> None:
+        customers = semantic_model_with_guaranteed_meta(name="customers")
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("order_count", AggregationType.COUNT, "1", "orders")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[customers, orders], metrics=[metric])).output
+
+        assert _ossie_metrics(result)[0].expression.dialects[0].expression == "COUNT(orders.*)"
+
+    def test_sum_of_constant_one_stays_a_sum(self) -> None:
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("row_total", AggregationType.SUM, "1", "orders")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[orders], metrics=[metric])).output
+
+        assert _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(1)"
+
+    def test_filtered_count_of_all_rows_keeps_the_filter(self) -> None:
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("paid_orders", AggregationType.COUNT, "1", "orders", filter_sql="status = 'paid'")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[orders], metrics=[metric])).output
+
+        assert (
+            _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(CASE WHEN status = 'paid' THEN 1 END)"
+        )
 
     # --- RATIO ---
 
