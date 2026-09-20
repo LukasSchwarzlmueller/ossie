@@ -21,6 +21,7 @@ import pytest
 from syrupy.assertion import SnapshotAssertion
 
 from ossie import OssieDataType, OssieDimension
+from ossie_dbt.converter_issues import ConverterIssue, ConverterIssueType
 from ossie_dbt.msi_to_ossie import MSIToOssieConverter
 from ossie_dbt.ossie_to_msi import OssieToMSIConverter
 from metricflow_semantic_interfaces.implementations.elements.measure import (
@@ -355,20 +356,25 @@ class TestOssieToMSIMetricConversion:
         ]
 
     @pytest.mark.parametrize("expression", ["COUNT(*)", "COUNT(1)"])
-    def test_bare_row_count_with_multiple_datasets_is_ambiguous(self, expression: str) -> None:
+    def test_bare_row_count_with_multiple_datasets_is_dropped_with_a_warning(self, expression: str) -> None:
         doc = _ossie_doc(datasets=self._customers_and_orders(), metrics=[_ossie_metric("order_count", expression)])
+        result = OssieToMSIConverter().convert(doc)
 
-        with pytest.raises(ValueError, match="ambiguous with 2 datasets"):
-            OssieToMSIConverter().convert(doc)
+        assert result.output.metrics == []
+        assert result.issues == [ConverterIssue(ConverterIssueType.ROW_COUNT_METRIC_DROPPED, "order_count")]
 
-    def test_bare_count_star_in_ratio_with_multiple_datasets_is_ambiguous(self) -> None:
+    def test_ratio_with_a_bare_count_star_is_dropped_as_a_whole(self) -> None:
         doc = _ossie_doc(
             datasets=self._customers_and_orders(),
-            metrics=[_ossie_metric("avg_order_value", "(SUM(amount)) / (COUNT(*))")],
+            metrics=[
+                _ossie_metric("revenue", "SUM(orders.amount)"),
+                _ossie_metric("avg_order_value", "(SUM(orders.amount)) / (COUNT(*))"),
+            ],
         )
+        result = OssieToMSIConverter().convert(doc)
 
-        with pytest.raises(ValueError, match="ambiguous"):
-            OssieToMSIConverter().convert(doc)
+        assert [m.name for m in result.output.metrics] == ["revenue"]
+        assert result.issues == [ConverterIssue(ConverterIssueType.ROW_COUNT_METRIC_DROPPED, "avg_order_value")]
 
     def test_qualified_count_star_in_ratio_binds_both_sides_to_the_same_dataset(self) -> None:
         doc = _ossie_doc(
@@ -394,16 +400,17 @@ class TestOssieToMSIMetricConversion:
         assert params is not None
         assert params.semantic_model == "orders"
 
-    def test_count_star_of_unknown_dataset_is_rejected(self) -> None:
+    def test_count_star_of_unknown_dataset_is_dropped_with_a_warning(self) -> None:
         doc = _ossie_doc(
             datasets=self._customers_and_orders(),
             metrics=[_ossie_metric("order_count", "COUNT(nope.*)")],
         )
+        result = OssieToMSIConverter().convert(doc)
 
-        with pytest.raises(ValueError, match="does not match exactly one dataset"):
-            OssieToMSIConverter().convert(doc)
+        assert result.output.metrics == []
+        assert [i.element_name for i in result.issues] == ["order_count"]
 
-    def test_count_star_matching_several_datasets_by_last_segment_is_rejected(self) -> None:
+    def test_count_star_matching_several_datasets_by_last_segment_is_dropped_with_a_warning(self) -> None:
         doc = _ossie_doc(
             datasets=[
                 _ossie_dataset("a.orders", fields=[_ossie_field("order_id")]),
@@ -411,9 +418,10 @@ class TestOssieToMSIMetricConversion:
             ],
             metrics=[_ossie_metric("order_count", "COUNT(orders.*)")],
         )
+        result = OssieToMSIConverter().convert(doc)
 
-        with pytest.raises(ValueError, match="does not match exactly one dataset"):
-            OssieToMSIConverter().convert(doc)
+        assert result.output.metrics == []
+        assert [i.element_name for i in result.issues] == ["order_count"]
 
     @pytest.mark.parametrize(
         "expression",
