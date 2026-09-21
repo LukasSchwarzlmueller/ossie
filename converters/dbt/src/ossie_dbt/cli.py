@@ -42,6 +42,10 @@ _ISSUE_REASON: dict[ConverterIssueType, str] = {
     ConverterIssueType.NATURAL_ENTITY_DROPPED: "Ossie has no natural-key entity type",
     ConverterIssueType.CUMULATIVE_SEMANTICS_LOSS: "Ossie expressions cannot represent window or grain semantics; the base aggregation was preserved",
     ConverterIssueType.ROW_COUNT_METRIC_DROPPED: "COUNT(*) does not identify exactly one dataset to count rows of; write it as COUNT(<dataset>.*)",
+    ConverterIssueType.AMBIGUOUS_REFERENCE_METRIC_DROPPED: (
+        "an input metric is listed more than once under one reference with differing filters, "
+        "so the expression reference is ambiguous; give each occurrence a distinct alias"
+    ),
 }
 
 _DROPPED_ISSUE_TYPES = {
@@ -49,6 +53,7 @@ _DROPPED_ISSUE_TYPES = {
     ConverterIssueType.PRIVATE_METRIC_DROPPED,
     ConverterIssueType.NATURAL_ENTITY_DROPPED,
     ConverterIssueType.ROW_COUNT_METRIC_DROPPED,
+    ConverterIssueType.AMBIGUOUS_REFERENCE_METRIC_DROPPED,
 }
 
 
