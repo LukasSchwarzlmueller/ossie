@@ -320,8 +320,8 @@ class TestOssieToMSIMetricConversion:
         sm = result.semantic_models[0]
         assert len(sm.measures) == 0
 
-    @pytest.mark.parametrize("expression", ["COUNT(*)", "COUNT(orders.*)"])
-    def test_count_star_uses_constant_expr(self, expression: str) -> None:
+    @pytest.mark.parametrize("expression", ["COUNT(*)", "COUNT(orders.*)", "COUNT(2)", "COUNT(TRUE)", "COUNT(0)"])
+    def test_count_of_a_constant_normalizes_to_row_count_expr(self, expression: str) -> None:
         doc = _ossie_doc(
             datasets=[_ossie_dataset("orders", fields=[_ossie_field("order_id")])],
             metrics=[_ossie_metric("order_count", expression)],
@@ -355,7 +355,7 @@ class TestOssieToMSIMetricConversion:
             _ossie_dataset("orders", fields=[_ossie_field("order_id"), _ossie_field("amount")]),
         ]
 
-    @pytest.mark.parametrize("expression", ["COUNT(*)", "COUNT(1)"])
+    @pytest.mark.parametrize("expression", ["COUNT(*)", "COUNT(1)", "COUNT(2)", "COUNT(0)", "COUNT(TRUE)"])
     def test_bare_row_count_with_multiple_datasets_is_dropped_with_a_warning(self, expression: str) -> None:
         doc = _ossie_doc(datasets=self._customers_and_orders(), metrics=[_ossie_metric("order_count", expression)])
         result = OssieToMSIConverter().convert(doc)
@@ -425,7 +425,7 @@ class TestOssieToMSIMetricConversion:
 
     @pytest.mark.parametrize(
         "expression",
-        ["COUNT(DISTINCT *)", "COUNT(orders.*, amount)", "COUNT(db.orders, *)"],
+        ["COUNT(DISTINCT *)", "COUNT(DISTINCT 1)", "COUNT(orders.*, amount)", "COUNT(db.orders, *)"],
     )
     def test_unsupported_count_star_forms_fall_back_to_the_raw_expression(self, expression: str) -> None:
         doc = _ossie_doc(

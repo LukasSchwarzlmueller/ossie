@@ -636,6 +636,29 @@ class TestMetricConversion:
             _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(CASE WHEN status = 'paid' THEN 1 END)"
         )
 
+    def test_a_reused_converter_instance_does_not_leak_state_between_calls(self) -> None:
+        """Sequential reuse of one converter instance must not mix up which metrics are row counts.
+
+        This does not reproduce a bug: sequential reuse worked even when that state lived on ``self``,
+        since each ``convert()`` call overwrote it before resolving any metric. Only two calls actually
+        overlapping (e.g. on separate threads) could corrupt it, which is why the state is no longer
+        stored on the instance at all: there is nothing left for a second call to overwrite.
+        """
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        row_count = _manifest(
+            semantic_models=[orders], metrics=[_metric_with_agg("order_count", AggregationType.COUNT, "1", "orders")]
+        )
+        plain_sum = _manifest(
+            semantic_models=[orders], metrics=[_metric_with_agg("total", AggregationType.SUM, "1", "orders")]
+        )
+        converter = MSIToOssieConverter()
+
+        converter.convert(row_count)
+        converter.convert(plain_sum)
+        result = converter.convert(row_count).output
+
+        assert _ossie_metrics(result)[0].expression.dialects[0].expression == "COUNT(orders.*)"
+
     # --- RATIO ---
 
     def test_ratio_metric_inlines_sub_expressions(self, snapshot: SnapshotAssertion) -> None:
