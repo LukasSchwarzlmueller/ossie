@@ -758,8 +758,17 @@ class TestOssieToMSIRoundTrip:
         assert metrics[0].expression.dialects[0].expression == "SUM(orders.amount)"
         assert ossie_doc.to_ossie_yaml() == snapshot
 
-    def test_count_star_keeps_its_dataset_across_round_trip(self) -> None:
-        """COUNT(orders.*) must not drift to another dataset (or to SUM) on Ossie → MSI → Ossie → MSI."""
+    def test_count_star_round_trips_to_a_portable_sum_one(self) -> None:
+        """COUNT(orders.*) survives one round trip as the portable SUM(1), not the original invalid expr '*'.
+
+        The dataset is not recovered on this leg: MSI has already collapsed the metric to agg=SUM, expr='1'
+        by the time it reaches MSIToOssieConverter (MetricFlow's own transform runs first), and SUM(1) has
+        no qualifier to recover a dataset from. Emitting COUNT(<dataset>.*) instead, to carry the dataset
+        through, was tried and reverted: it is outside the Ossie expression spec, several engines reject or
+        misinterpret it, and no sibling converter recognizes it as a row count. SUM(1) is what every engine
+        agrees on. Converting SUM(1) forward again, with more than one dataset, still silently picks the
+        first dataset rather than refusing like a bare COUNT(*) does; closing that gap is tracked separately.
+        """
         original = _ossie_doc(
             datasets=[
                 _ossie_dataset("customers", fields=[_ossie_field("customer_id")]),
@@ -775,18 +784,8 @@ class TestOssieToMSIRoundTrip:
         ossie_doc = MSIToOssieConverter().convert(msi).output
 
         expressions = {m.name: m.expression.dialects[0].expression for m in ossie_doc.metrics or []}
-        assert expressions["order_count"] == "COUNT(orders.*)"
-        assert "COUNT(orders.*)" in expressions["avg_order_value"]
-
-        again = OssieToMSIConverter().convert(ossie_doc).output
-        order_count = next(m for m in again.metrics if m.name == "order_count")
-        params = order_count.type_params.metric_aggregation_params
-        assert params is not None
-        assert (params.agg, order_count.type_params.expr, params.semantic_model) == (
-            AggregationType.COUNT,
-            "1",
-            "orders",
-        )
+        assert expressions["order_count"] == "SUM(1)"
+        assert "SUM(1)" in expressions["avg_order_value"]
 
     def test_discrete_percentile_survives_round_trip(self) -> None:
         """A PERCENTILE_DISC metric keeps use_discrete_percentile through MSI -> Ossie -> MSI."""

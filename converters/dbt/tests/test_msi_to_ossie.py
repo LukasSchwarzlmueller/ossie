@@ -607,17 +607,34 @@ class TestMetricConversion:
 
         assert _ossie_metrics(result)[0].expression.dialects[0].expression == "AVG(orders.price)"
 
-    def test_count_of_all_rows_keeps_its_semantic_model(self) -> None:
+    @pytest.mark.parametrize("agg", [AggregationType.COUNT, AggregationType.SUM])
+    def test_a_row_count_always_comes_back_as_portable_sum_1(self, agg: AggregationType) -> None:
+        """COUNT(*) and SUM(1) mean the same thing in SQL, so both convert the same way.
+
+        Emitting ``COUNT(<dataset>.*)`` to keep the dataset through a round trip was tried and reverted:
+        it is not in the Ossie expression spec, several engines reject or misinterpret it, and the
+        sibling converters do not recognize it as a row count either. ``SUM(1)`` is what every engine
+        and converter agrees on, even though the dataset cannot be recovered on this leg of a round trip.
+        """
         customers = semantic_model_with_guaranteed_meta(name="customers")
         orders = semantic_model_with_guaranteed_meta(name="orders")
-        metric = _metric_with_agg("order_count", AggregationType.COUNT, "1", "orders")
+        metric = _metric_with_agg("order_count", agg, "1", "orders")
         result = MSIToOssieConverter().convert(_manifest(semantic_models=[customers, orders], metrics=[metric])).output
 
-        assert _ossie_metrics(result)[0].expression.dialects[0].expression == "COUNT(orders.*)"
+        assert _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(1)"
 
-    def test_sum_of_constant_one_stays_a_sum(self) -> None:
-        orders = semantic_model_with_guaranteed_meta(name="orders")
-        metric = _metric_with_agg("row_total", AggregationType.SUM, "1", "orders")
+    def test_legacy_measure_based_count_also_converts(self) -> None:
+        """A SIMPLE metric over a legacy Measure(agg=count, expr=1) is a row count too, not just the
+
+        newer metric_aggregation_params shape. It converts correctly with no special-casing, because
+        MetricFlow's own transform normalizes both shapes to the same agg=SUM, expr='1' before this
+        converter ever sees the metric.
+        """
+        orders = semantic_model_with_guaranteed_meta(
+            name="orders",
+            measures=[_measure("order_count_measure", agg=AggregationType.COUNT, expr="1")],
+        )
+        metric = _simple_metric("order_count", measure_name="order_count_measure")
         result = MSIToOssieConverter().convert(_manifest(semantic_models=[orders], metrics=[metric])).output
 
         assert _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(1)"
@@ -630,29 +647,6 @@ class TestMetricConversion:
         assert (
             _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(CASE WHEN status = 'paid' THEN 1 END)"
         )
-
-    def test_a_reused_converter_instance_does_not_leak_state_between_calls(self) -> None:
-        """Sequential reuse of one converter instance must not mix up which metrics are row counts.
-
-        This does not reproduce a bug: sequential reuse worked even when that state lived on ``self``,
-        since each ``convert()`` call overwrote it before resolving any metric. Only two calls actually
-        overlapping (e.g. on separate threads) could corrupt it, which is why the state is no longer
-        stored on the instance at all: there is nothing left for a second call to overwrite.
-        """
-        orders = semantic_model_with_guaranteed_meta(name="orders")
-        row_count = _manifest(
-            semantic_models=[orders], metrics=[_metric_with_agg("order_count", AggregationType.COUNT, "1", "orders")]
-        )
-        plain_sum = _manifest(
-            semantic_models=[orders], metrics=[_metric_with_agg("total", AggregationType.SUM, "1", "orders")]
-        )
-        converter = MSIToOssieConverter()
-
-        converter.convert(row_count)
-        converter.convert(plain_sum)
-        result = converter.convert(row_count).output
-
-        assert _ossie_metrics(result)[0].expression.dialects[0].expression == "COUNT(orders.*)"
 
     # --- RATIO ---
 
