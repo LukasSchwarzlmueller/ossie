@@ -385,6 +385,19 @@ class TestOssieToMSIMetricConversion:
         assert [m.name for m in result.output.metrics] == ["revenue"]
         assert result.issues == [ConverterIssue(ConverterIssueType.ROW_COUNT_METRIC_DROPPED, "avg_order_value")]
 
+    def test_ratio_with_a_distinct_row_count_is_dropped_as_a_whole(self) -> None:
+        doc = _ossie_doc(
+            datasets=self._customers_and_orders(),
+            metrics=[
+                _ossie_metric("revenue", "SUM(orders.amount)"),
+                _ossie_metric("avg_order_value", "(SUM(orders.amount)) / (COUNT(DISTINCT *))"),
+            ],
+        )
+        result = OssieToMSIConverter().convert(doc)
+
+        assert [m.name for m in result.output.metrics] == ["revenue"]
+        assert result.issues == [ConverterIssue(ConverterIssueType.ROW_COUNT_METRIC_DROPPED, "avg_order_value")]
+
     def test_qualified_count_star_in_ratio_binds_both_sides_to_the_same_dataset(self) -> None:
         doc = _ossie_doc(
             datasets=self._customers_and_orders(),
@@ -432,10 +445,7 @@ class TestOssieToMSIMetricConversion:
         assert result.output.metrics == []
         assert [i.element_name for i in result.issues] == ["order_count"]
 
-    @pytest.mark.parametrize(
-        "expression",
-        ["COUNT(DISTINCT *)", "COUNT(DISTINCT 1)", "COUNT(orders.*, amount)", "COUNT(db.orders, *)"],
-    )
+    @pytest.mark.parametrize("expression", ["COUNT(orders.*, amount)", "COUNT(db.orders, *)"])
     def test_unsupported_count_star_forms_fall_back_to_the_raw_expression(self, expression: str) -> None:
         doc = _ossie_doc(
             datasets=[_ossie_dataset("orders", fields=[_ossie_field("order_id"), _ossie_field("amount")])],
@@ -444,6 +454,22 @@ class TestOssieToMSIMetricConversion:
         result = OssieToMSIConverter().convert(doc).output
 
         assert result.metrics[0].type_params.expr == expression
+
+    @pytest.mark.parametrize("expression", ["COUNT(DISTINCT *)", "COUNT(DISTINCT 1)", "COUNT(DISTINCT orders.*)"])
+    def test_distinct_of_a_row_count_is_dropped_with_a_warning(self, expression: str) -> None:
+        """COUNT(DISTINCT *) and friends are valid SQL but answer 'does any row exist' (0 or 1), not a
+
+        meaningful total. Falling back to a raw SUM of it would be a nested aggregate MetricFlow cannot
+        run, bound to a guessed dataset; dropped instead, the same as an unresolvable COUNT(*).
+        """
+        doc = _ossie_doc(
+            datasets=[_ossie_dataset("orders", fields=[_ossie_field("order_id"), _ossie_field("amount")])],
+            metrics=[_ossie_metric("odd_count", expression)],
+        )
+        result = OssieToMSIConverter().convert(doc)
+
+        assert result.output.metrics == []
+        assert [i.element_name for i in result.issues] == ["odd_count"]
 
     def test_ratio_expression_produces_ratio_metric(self) -> None:
         doc = _ossie_doc(

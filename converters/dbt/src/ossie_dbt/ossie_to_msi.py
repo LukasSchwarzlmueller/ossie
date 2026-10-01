@@ -31,6 +31,7 @@ from ossie_dbt.expression_utils import (
     ROW_COUNT_EXPR,
     _extract_agg_info,
     _get_dataset_qualifier,
+    _is_unsupported_distinct_row_count,
     _strip_qualifier,
     _try_parse_ratio,
 )
@@ -76,7 +77,12 @@ class _KeySets:
 
 
 class _UnresolvedRowCountDataset(Exception):
-    """A ``COUNT(*)`` that does not identify exactly one dataset to count the rows of."""
+    """A row-count expression that cannot be safely converted into a metric.
+
+    Either it does not identify exactly one dataset to count the rows of (a bare ``COUNT(*)`` with
+    more than one dataset, or a qualifier matching none or several), or it is a form with no sensible
+    translation at all, such as ``COUNT(DISTINCT *)``.
+    """
 
 
 class OssieToMSIConverter:
@@ -359,6 +365,12 @@ class OssieToMSIConverter:
                 config=None,
             )
             return [*num_metrics, *den_metrics, ratio_metric]
+
+        # COUNT(DISTINCT *) / COUNT(DISTINCT 1) / ...: not a column count and not a row count either
+        # (it answers whether any row exists, 0 or 1). Drop rather than fall back to a raw SUM of it,
+        # which MetricFlow cannot run and which would guess a dataset the way a row count must not.
+        if _is_unsupported_distinct_row_count(expr_str):
+            raise _UnresolvedRowCountDataset(f"{expr_str!r} has no sensible SIMPLE or RATIO translation")
 
         # --- Fallback: complex expression that can't be decomposed ---
         # Store the raw expression in `expr` with a best-guess aggregation type.

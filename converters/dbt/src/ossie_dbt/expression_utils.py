@@ -54,6 +54,28 @@ def _is_row_count_argument(node: exp.Expression) -> bool:
     return False
 
 
+def _is_unsupported_distinct_row_count(expression: str) -> bool:
+    """Return True for ``COUNT(DISTINCT <row-count argument>)``, e.g. ``COUNT(DISTINCT *)`` or ``COUNT(DISTINCT 1)``.
+
+    These parse and run as SQL, but counting distinct values of ``*`` or a constant is not a sensible
+    aggregation for a semantic layer: it answers whether any row exists (0 or 1), not a meaningful total,
+    and ``_extract_agg_info`` already declines to treat it as ``COUNT`` or ``COUNT_DISTINCT`` of a column.
+    The caller should drop the metric with an issue rather than fall back to a raw expression, which would
+    wrap this inside another aggregate (``SUM(COUNT(DISTINCT ...))``, not valid for MetricFlow to run) and
+    guess a dataset the way a row count must not.
+    """
+    try:
+        tree = sqlglot.parse_one(expression.strip())
+    except sqlglot.errors.ParseError:
+        return False
+    if not isinstance(tree, exp.Count) or tree.args.get("expressions"):
+        return False
+    argument = tree.this
+    if not isinstance(argument, exp.Distinct) or len(argument.expressions) != 1:
+        return False
+    return _is_row_count_argument(argument.expressions[0])
+
+
 def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, Optional[float], bool]]:
     """Parse a SQL aggregation expression using sqlglot.
 
