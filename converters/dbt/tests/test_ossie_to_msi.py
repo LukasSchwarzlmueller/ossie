@@ -342,6 +342,30 @@ class TestOssieToMSIMetricConversion:
         assert m.type_params.metric_aggregation_params.agg == AggregationType.COUNT
         assert m.type_params.expr == "1"
 
+    @pytest.mark.parametrize(("expression", "expr"), [("SUM(1)", "1"), ("SUM(2)", "2"), ("SUM(TRUE)", "TRUE")])
+    def test_sum_of_a_constant_keeps_its_value(self, expression: str, expr: str) -> None:
+        """SUM adds the constant up, so SUM(2) is twice the row count and must not become SUM(1)."""
+        doc = _ossie_doc(
+            datasets=[_ossie_dataset("orders", fields=[_ossie_field("order_id")])],
+            metrics=[_ossie_metric("total", expression)],
+        )
+        result = OssieToMSIConverter().convert(doc).output
+
+        m = result.metrics[0]
+        assert m.type_params.metric_aggregation_params is not None
+        assert m.type_params.metric_aggregation_params.agg == AggregationType.SUM
+        assert m.type_params.metric_aggregation_params.semantic_model == "orders"
+        assert m.type_params.expr == expr
+
+    @pytest.mark.parametrize("expression", ["SUM(1)", "SUM(2)", "SUM(0)"])
+    def test_sum_of_a_constant_with_multiple_datasets_is_dropped_with_a_warning(self, expression: str) -> None:
+        """A constant has no column to place it in a dataset, so with several it is refused, not guessed."""
+        doc = _ossie_doc(datasets=self._customers_and_orders(), metrics=[_ossie_metric("total", expression)])
+        result = OssieToMSIConverter().convert(doc)
+
+        assert result.output.metrics == []
+        assert [i.element_name for i in result.issues] == ["total"]
+
     def test_qualified_count_star_uses_dataset_qualifier(self) -> None:
         doc = _ossie_doc(
             datasets=[
@@ -455,12 +479,26 @@ class TestOssieToMSIMetricConversion:
 
         assert result.metrics[0].type_params.expr == expression
 
-    @pytest.mark.parametrize("expression", ["COUNT(DISTINCT *)", "COUNT(DISTINCT 1)", "COUNT(DISTINCT orders.*)"])
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "COUNT(DISTINCT *)",
+            "COUNT(DISTINCT 1)",
+            "COUNT(DISTINCT orders.*)",
+            "COUNT(DISTINCT (*))",
+            "COUNT(DISTINCT (1))",
+            "(COUNT(DISTINCT *))",
+            "COUNT(DISTINCT *) * 100",
+            "COALESCE(COUNT(DISTINCT 1), 0)",
+            "CAST(COUNT(DISTINCT *) AS INT)",
+        ],
+    )
     def test_distinct_of_a_row_count_is_dropped_with_a_warning(self, expression: str) -> None:
         """COUNT(DISTINCT *) and friends are valid SQL but answer 'does any row exist' (0 or 1), not a
 
         meaningful total. Falling back to a raw SUM of it would be a nested aggregate MetricFlow cannot
-        run, bound to a guessed dataset; dropped instead, the same as an unresolvable COUNT(*).
+        run, bound to a guessed dataset; dropped instead, the same as an unresolvable COUNT(*). Caught
+        whether it is the whole expression, redundantly parenthesized, or wrapped in another function.
         """
         doc = _ossie_doc(
             datasets=[_ossie_dataset("orders", fields=[_ossie_field("order_id"), _ossie_field("amount")])],
@@ -792,8 +830,13 @@ class TestOssieToMSIRoundTrip:
         no qualifier to recover a dataset from. Emitting COUNT(<dataset>.*) instead, to carry the dataset
         through, was tried and reverted: it is outside the Ossie expression spec, several engines reject or
         misinterpret it, and no sibling converter recognizes it as a row count. SUM(1) is what every engine
-        agrees on. Converting SUM(1) forward again, with more than one dataset, still silently picks the
-        first dataset rather than refusing like a bare COUNT(*) does; closing that gap is tracked separately.
+        agrees on.
+
+        Converting SUM(1) forward again, with more than one dataset, now refuses rather than silently
+        picking the first dataset: SUM of a constant has no column to place it in a dataset, so it goes
+        through the same ambiguity check as COUNT(*) and is dropped with ROW_COUNT_METRIC_DROPPED instead of
+        a plausible but wrong semantic_model. The dataset is genuinely lost by this point, not recoverable; refusing is
+        the honest outcome, not a bug to fix on the next leg.
         """
         original = _ossie_doc(
             datasets=[
@@ -812,6 +855,19 @@ class TestOssieToMSIRoundTrip:
         expressions = {m.name: m.expression.dialects[0].expression for m in ossie_doc.metrics or []}
         assert expressions["order_count"] == "SUM(1)"
         assert "SUM(1)" in expressions["avg_order_value"]
+
+        # The first round trip already flattened the ratio into independent metrics (numerator,
+        # denominator, and the ratio's own expression string). Only the ones that are still row
+        # counts drop here: the denominator (SUM(1), ambiguous) and the ratio itself, which depends
+        # on it. The numerator (SUM(orders.amount), not a row count) is a valid metric on its own
+        # and survives, same as it would have before any of this.
+        again = OssieToMSIConverter().convert(ossie_doc)
+        assert [m.name for m in again.output.metrics] == ["avg_order_value__numerator"]
+        assert {i.element_name for i in again.issues} == {
+            "order_count",
+            "avg_order_value",
+            "avg_order_value__denominator",
+        }
 
     def test_discrete_percentile_survives_round_trip(self) -> None:
         """A PERCENTILE_DISC metric keeps use_discrete_percentile through MSI -> Ossie -> MSI."""

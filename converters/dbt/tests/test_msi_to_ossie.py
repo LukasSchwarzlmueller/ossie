@@ -22,10 +22,11 @@ import jinja2
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
-from ossie_dbt.converter_issues import ConverterIssueType
+from ossie_dbt.converter_issues import ConverterIssue, ConverterIssueType
 from ossie_dbt.filter_utils import _render_filter_template
 from ossie import OssieDialect, OssieDocument
 from ossie_dbt.msi_to_ossie import MSIToOssieConverter
+from metricflow_semantics.model.dbt_manifest_parser import parse_manifest_from_dbt_generated_manifest
 from metricflow_semantic_interfaces.implementations.metric import (
     PydanticConversionTypeParams,
     PydanticCumulativeTypeParams,
@@ -609,7 +610,10 @@ class TestMetricConversion:
 
     @pytest.mark.parametrize("agg", [AggregationType.COUNT, AggregationType.SUM])
     def test_a_row_count_always_comes_back_as_portable_sum_1(self, agg: AggregationType) -> None:
-        """COUNT(*) and SUM(1) mean the same thing in SQL, so both convert the same way.
+        """A COUNT/expr=1 metric comes back as SUM(1), like a SUM/expr=1 one.
+
+        MetricFlow's own transform has already turned the count into a sum by the time this converter
+        sees it. SUM(1) matches COUNT(*) on any non-empty input; over zero rows it is NULL, not 0.
 
         Emitting ``COUNT(<dataset>.*)`` to keep the dataset through a round trip was tried and reverted:
         it is not in the Ossie expression spec, several engines reject or misinterpret it, and the
@@ -622,6 +626,36 @@ class TestMetricConversion:
         result = MSIToOssieConverter().convert(_manifest(semantic_models=[customers, orders], metrics=[metric])).output
 
         assert _ossie_metrics(result)[0].expression.dialects[0].expression == "SUM(1)"
+
+    def test_constant_metric_records_the_lost_semantic_model_on_the_cli_path(self) -> None:
+        """Routed through the real dbt loader, as the CLI does: the count is already SUM(1) by then."""
+        customers = semantic_model_with_guaranteed_meta(name="customers")
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("order_count", AggregationType.COUNT, "1", "orders")
+        manifest_json = _manifest(semantic_models=[customers, orders], metrics=[metric]).json(
+            by_alias=True, exclude_none=True
+        )
+        result = MSIToOssieConverter().convert(parse_manifest_from_dbt_generated_manifest(manifest_json))
+
+        assert _ossie_metrics(result.output)[0].expression.dialects[0].expression == "SUM(1)"
+        assert result.issues == [
+            ConverterIssue(ConverterIssueType.CONSTANT_METRIC_SEMANTIC_MODEL_LOSS, "order_count")
+        ]
+
+    def test_constant_metric_with_a_single_semantic_model_loses_nothing(self) -> None:
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("order_count", AggregationType.COUNT, "1", "orders")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[orders], metrics=[metric]))
+
+        assert result.issues == []
+
+    def test_column_metric_with_several_semantic_models_loses_nothing(self) -> None:
+        customers = semantic_model_with_guaranteed_meta(name="customers")
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("revenue", AggregationType.SUM, "amount", "orders")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[customers, orders], metrics=[metric]))
+
+        assert result.issues == []
 
     def test_legacy_measure_based_count_also_converts(self) -> None:
         """A SIMPLE metric over a legacy Measure(agg=count, expr=1) is a row count too, not just the

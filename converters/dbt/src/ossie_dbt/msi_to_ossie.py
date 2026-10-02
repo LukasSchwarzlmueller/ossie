@@ -33,6 +33,7 @@ from ossie import (
     OssieRelationship,
 )
 from ossie_dbt.converter_issues import ConverterIssue, ConverterIssueType, ConverterResult
+from ossie_dbt.expression_utils import _is_constant_expr
 from ossie_dbt.filter_utils import _collect_filter_sql, _merge_filter_sqls
 
 from metricflow_semantic_interfaces.enum_extension import assert_values_exhausted
@@ -144,6 +145,16 @@ class MSIToOssieConverter:
                     description=metric.description,
                 )
             )
+            if len(manifest.semantic_models) > 1 and self._aggregates_a_constant(metric):
+                # SUM(1) and the like carry no column, so the semantic model the metric belonged to
+                # cannot be written into the Ossie expression. Converting it back refuses rather than
+                # guesses (ROW_COUNT_METRIC_DROPPED); record the loss here so it is not silent.
+                issues.append(
+                    ConverterIssue(
+                        issue_type=ConverterIssueType.CONSTANT_METRIC_SEMANTIC_MODEL_LOSS,
+                        element_name=metric.name,
+                    )
+                )
 
         return ConverterResult(
             output=OssieDocument(
@@ -275,9 +286,10 @@ class MSIToOssieConverter:
         """Resolve a SIMPLE metric using metric_aggregation_params (always set after transformation).
 
         No special case for a row count: ``SUM`` with ``expr == '1'`` already renders as ``SUM(1)``
-        through the generic path below, which is the same thing ``COUNT(*)`` means and is portable
-        across engines (unlike ``COUNT(<dataset>.*)``, which several engines reject or interpret
-        differently).
+        through the generic path below. That matches ``COUNT(*)`` on any non-empty input (over zero
+        rows ``SUM(1)`` is NULL where ``COUNT(*)`` is 0, as with MetricFlow's own COUNT → SUM rewrite)
+        and is portable across engines, unlike ``COUNT(<dataset>.*)``, which several engines reject or
+        interpret differently.
         """
         agg_params_obj = metric.type_params.metric_aggregation_params
         if agg_params_obj is None:
@@ -287,6 +299,13 @@ class MSIToOssieConverter:
         col = metric.type_params.expr if metric.type_params.expr is not None else metric.name
         col = self._qualify_col(col, agg_params_obj.semantic_model)
         return self._build_agg_expression(agg_params_obj.agg, col, agg_params_obj.agg_params, filter_sql)
+
+    @staticmethod
+    def _aggregates_a_constant(metric: Metric) -> bool:
+        """Return True for a SIMPLE metric over a constant expr, e.g. a row count rewritten to SUM(1)."""
+        params = metric.type_params.metric_aggregation_params
+        expr = metric.type_params.expr
+        return metric.type is MetricType.SIMPLE and params is not None and expr is not None and _is_constant_expr(expr)
 
     @staticmethod
     def _qualify_col(col: str, semantic_model: str) -> str:

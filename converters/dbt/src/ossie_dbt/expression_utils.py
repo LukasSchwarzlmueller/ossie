@@ -54,26 +54,42 @@ def _is_row_count_argument(node: exp.Expression) -> bool:
     return False
 
 
-def _is_unsupported_distinct_row_count(expression: str) -> bool:
-    """Return True for ``COUNT(DISTINCT <row-count argument>)``, e.g. ``COUNT(DISTINCT *)`` or ``COUNT(DISTINCT 1)``.
+def _is_constant_expr(expr: str) -> bool:
+    """Return True when ``expr`` is a non-null constant such as ``1``, ``2`` or ``TRUE``, not a column."""
+    try:
+        node = sqlglot.parse_one(expr)
+    except sqlglot.errors.ParseError:
+        return False
+    return isinstance(node, exp.Boolean) or (isinstance(node, exp.Literal) and not node.is_string)
 
-    These parse and run as SQL, but counting distinct values of ``*`` or a constant is not a sensible
-    aggregation for a semantic layer: it answers whether any row exists (0 or 1), not a meaningful total,
-    and ``_extract_agg_info`` already declines to treat it as ``COUNT`` or ``COUNT_DISTINCT`` of a column.
-    The caller should drop the metric with an issue rather than fall back to a raw expression, which would
-    wrap this inside another aggregate (``SUM(COUNT(DISTINCT ...))``, not valid for MetricFlow to run) and
-    guess a dataset the way a row count must not.
+
+def _contains_distinct_row_count(expression: str) -> bool:
+    """Return True if ``expression`` contains ``COUNT(DISTINCT <row-count argument>)`` anywhere in its tree.
+
+    ``COUNT(DISTINCT *)`` / ``COUNT(DISTINCT 1)`` and friends parse and run as SQL, but counting distinct
+    values of ``*`` or a constant is not a sensible aggregation for a semantic layer: it answers whether
+    any row exists (0 or 1), not a meaningful total. The caller should drop the metric with an issue
+    rather than fall back to a raw expression, which would wrap this inside another aggregate
+    (``SUM(COUNT(DISTINCT ...))``, not valid for MetricFlow to run) and guess a dataset the way a row
+    count must not.
+
+    Searches the whole tree, not just the top node, so a wrapped or combined form such as
+    ``(COUNT(DISTINCT *))``, ``COUNT(DISTINCT *) * 100`` or ``COALESCE(COUNT(DISTINCT 1), 0)`` is still
+    caught, not only a bare ``COUNT(DISTINCT *)`` as the entire expression. The DISTINCT operand is
+    unnested before the check, so ``COUNT(DISTINCT (*))`` is caught the same way as ``COUNT(DISTINCT *)``.
     """
     try:
         tree = sqlglot.parse_one(expression.strip())
     except sqlglot.errors.ParseError:
         return False
-    if not isinstance(tree, exp.Count) or tree.args.get("expressions"):
-        return False
-    argument = tree.this
-    if not isinstance(argument, exp.Distinct) or len(argument.expressions) != 1:
-        return False
-    return _is_row_count_argument(argument.expressions[0])
+    for count in tree.find_all(exp.Count):
+        argument = count.this
+        if count.args.get("expressions") or not isinstance(argument, exp.Distinct):
+            continue
+        operands = argument.expressions
+        if len(operands) == 1 and _is_row_count_argument(operands[0].unnest()):
+            return True
+    return False
 
 
 def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, Optional[float], bool]]:
@@ -82,9 +98,10 @@ def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, O
     Returns ``(agg_type, bare_col, percentile, use_discrete_percentile)`` for recognised patterns,
     ``None`` otherwise. ``percentile`` is only set for ``PERCENTILE`` aggregations; it is ``None``
     for all others. ``use_discrete_percentile`` is ``True`` only for ``PERCENTILE_DISC``.
-    The returned column name has any dataset qualifier stripped. ``COUNT`` of ``*`` or of any non-null constant
-    (``COUNT(1)``, ``COUNT(TRUE)``, ...) returns ``ROW_COUNT_EXPR`` instead of a column name;
-    ``COUNT(DISTINCT ...)`` of one of those, and multi-argument ``COUNT``, return ``None``.
+    The returned column name has any dataset qualifier stripped. ``COUNT`` of ``*`` or of any non-null
+    constant (``COUNT(1)``, ``COUNT(TRUE)``, ...) returns ``ROW_COUNT_EXPR`` instead of a column name;
+    ``SUM`` of a constant returns the constant itself (``SUM(2)`` → ``'2'``). ``COUNT(DISTINCT ...)`` of a
+    row-count argument, and multi-argument ``COUNT``, return ``None``.
     """
     try:
         tree = sqlglot.parse_one(expression.strip())
@@ -101,8 +118,9 @@ def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, O
             if len(operands) != 1:
                 return None
             argument, distinct = operands[0], True
-        if _is_row_count_argument(argument):
-            # COUNT(*), COUNT(1), COUNT(TRUE), ... → count all rows; COUNT(DISTINCT ...) of one is not valid SQL
+        if _is_row_count_argument(argument.unnest()):
+            # COUNT(*), COUNT(1), COUNT(TRUE), ... → count all rows; COUNT(DISTINCT ...) of one is not valid SQL.
+            # Unnested so a redundant paren, e.g. COUNT(DISTINCT (*)), is still recognised.
             return None if distinct else (AggregationType.COUNT, ROW_COUNT_EXPR, None, False)
         return (AggregationType.COUNT_DISTINCT if distinct else AggregationType.COUNT), _col_name(argument), None, False
 
@@ -121,8 +139,13 @@ def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, O
             return AggregationType.SUM_BOOLEAN, ifs[0].this.sql(), None, False
         return None
 
-    # SUM(col)
+    # SUM(col), or SUM(<constant>). A constant keeps its own value (SUM(2) is twice the row count,
+    # not SUM(1)); the caller uses _is_constant_expr to send it through the same dataset check as
+    # COUNT(*), since a constant has no column to place it in a dataset.
     if isinstance(tree, exp.Sum):
+        argument = tree.this.unnest()
+        if _is_constant_expr(argument.sql()):
+            return AggregationType.SUM, argument.sql(), None, False
         return AggregationType.SUM, _col_name(tree.this), None, False
 
     if isinstance(tree, exp.Avg):
