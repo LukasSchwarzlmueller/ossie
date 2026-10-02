@@ -366,6 +366,17 @@ class TestOssieToMSIMetricConversion:
         assert result.output.metrics == []
         assert [i.element_name for i in result.issues] == ["total"]
 
+    def test_unparseable_expression_does_not_abort_the_conversion(self) -> None:
+        """An unterminated quote is a sqlglot TokenError, not a ParseError; it falls back, it doesn't crash."""
+        expression = "SUM(CASE WHEN status = 'paid THEN amount END)"
+        doc = _ossie_doc(
+            datasets=[_ossie_dataset("orders", fields=[_ossie_field("amount")])],
+            metrics=[_ossie_metric("paid", expression)],
+        )
+        result = OssieToMSIConverter().convert(doc).output
+
+        assert result.metrics[0].type_params.expr == expression
+
     def test_qualified_count_star_uses_dataset_qualifier(self) -> None:
         doc = _ossie_doc(
             datasets=[

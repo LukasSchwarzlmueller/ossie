@@ -649,6 +649,26 @@ class TestMetricConversion:
 
         assert result.issues == []
 
+    @pytest.mark.parametrize("agg", [AggregationType.MAX, AggregationType.AVERAGE])
+    def test_non_sum_constant_metric_is_not_flagged(self, agg: AggregationType) -> None:
+        """Only SUM of a constant is refused on the way back, so only SUM gets the loss warning."""
+        customers = semantic_model_with_guaranteed_meta(name="customers")
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("m", agg, "1", "orders")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[customers, orders], metrics=[metric]))
+
+        assert result.issues == []
+
+    def test_unparseable_expr_does_not_abort_the_conversion(self) -> None:
+        """An unterminated quote is a sqlglot TokenError, not a ParseError; it must not crash the run."""
+        customers = semantic_model_with_guaranteed_meta(name="customers")
+        orders = semantic_model_with_guaranteed_meta(name="orders")
+        metric = _metric_with_agg("m", AggregationType.SUM, "CASE WHEN status = 'paid THEN amount END", "orders")
+        result = MSIToOssieConverter().convert(_manifest(semantic_models=[customers, orders], metrics=[metric]))
+
+        assert [m.name for m in _ossie_metrics(result.output)] == ["m"]
+        assert result.issues == []
+
     def test_column_metric_with_several_semantic_models_loses_nothing(self) -> None:
         customers = semantic_model_with_guaranteed_meta(name="customers")
         orders = semantic_model_with_guaranteed_meta(name="orders")

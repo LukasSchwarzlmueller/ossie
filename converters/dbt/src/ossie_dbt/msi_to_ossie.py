@@ -302,10 +302,16 @@ class MSIToOssieConverter:
 
     @staticmethod
     def _aggregates_a_constant(metric: Metric) -> bool:
-        """Return True for a SIMPLE metric over a constant expr, e.g. a row count rewritten to SUM(1)."""
+        """Return True for a SIMPLE SUM over a constant expr, e.g. a row count rewritten to SUM(1).
+
+        Only SUM: it is the one aggregation the Ossie → MSI side resolves as a constant (and refuses on
+        ambiguous datasets). MAX(1), AVG(1) and the like go through the ordinary column lookup there.
+        """
         params = metric.type_params.metric_aggregation_params
         expr = metric.type_params.expr
-        return metric.type is MetricType.SIMPLE and params is not None and expr is not None and _is_constant_expr(expr)
+        if metric.type is not MetricType.SIMPLE or params is None or expr is None:
+            return False
+        return params.agg is AggregationType.SUM and _is_constant_expr(expr)
 
     @staticmethod
     def _qualify_col(col: str, semantic_model: str) -> str:

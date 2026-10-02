@@ -58,7 +58,7 @@ def _is_constant_expr(expr: str) -> bool:
     """Return True when ``expr`` is a non-null constant such as ``1``, ``2`` or ``TRUE``, not a column."""
     try:
         node = sqlglot.parse_one(expr)
-    except sqlglot.errors.ParseError:
+    except sqlglot.errors.SqlglotError:
         return False
     return isinstance(node, exp.Boolean) or (isinstance(node, exp.Literal) and not node.is_string)
 
@@ -80,7 +80,7 @@ def _contains_distinct_row_count(expression: str) -> bool:
     """
     try:
         tree = sqlglot.parse_one(expression.strip())
-    except sqlglot.errors.ParseError:
+    except sqlglot.errors.SqlglotError:
         return False
     for count in tree.find_all(exp.Count):
         argument = count.this
@@ -105,7 +105,7 @@ def _extract_agg_info(expression: str) -> Optional[Tuple[AggregationType, str, O
     """
     try:
         tree = sqlglot.parse_one(expression.strip())
-    except sqlglot.errors.ParseError:
+    except sqlglot.errors.SqlglotError:
         return None
 
     if isinstance(tree, exp.Count):
@@ -185,7 +185,7 @@ def _try_parse_ratio(expr_str: str) -> Optional[Tuple[str, str]]:
     """Try to parse ``(expr_a) / (expr_b)`` using sqlglot, returning ``(num_expr, den_expr)`` or None."""
     try:
         tree = sqlglot.parse_one(expr_str.strip())
-    except sqlglot.errors.ParseError:
+    except sqlglot.errors.SqlglotError:
         return None
 
     if not isinstance(tree, exp.Div):
@@ -207,7 +207,7 @@ def _get_dataset_qualifier(expression: str) -> Optional[str]:
     """Return the sole dataset qualifier referenced by an expression, if present."""
     try:
         tree = sqlglot.parse_one(expression.strip())
-    except sqlglot.errors.ParseError:
+    except sqlglot.errors.SqlglotError:
         return None
 
     qualifiers = {
